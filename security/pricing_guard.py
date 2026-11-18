@@ -1,20 +1,64 @@
-"""Starter code with known defects for pairwise-pricing-guard."""
+"""Server-side pricing guard.
 
-def server_price(*args, **kwargs):
-    raise NotImplementedError('TODO: implement server_price')
+Core rules:
+- Prices always come from the server-side price table, never the client.
+- Quantity must be a positive integer; gifts are not orderable line items.
+- Stacked discounts are capped.
+- Totals are recomputed server-side with a single rounding pass.
+- Refunds are based on the amount actually paid.
+"""
 
-def validate_quantity(*args, **kwargs):
-    raise NotImplementedError('TODO: implement validate_quantity')
+from decimal import Decimal, ROUND_HALF_UP
 
-def max_discount(*args, **kwargs):
-    raise NotImplementedError('TODO: implement max_discount')
+BASE_CURRENCY = 'CNY'
 
-def recompute_total(*args, **kwargs):
-    raise NotImplementedError('TODO: implement recompute_total')
 
-def round_money(*args, **kwargs):
-    raise NotImplementedError('TODO: implement round_money')
+def server_price(sku, price_table):
+    """Look up the authoritative price for a sku. Unknown skus -> None."""
+    return price_table.get(sku)
 
-def refund_amount(*args, **kwargs):
-    raise NotImplementedError('TODO: implement refund_amount')
 
+def validate_quantity(qty, gift=False):
+    """Quantity must be a positive integer. Gift items are not valid purchases."""
+    if gift:
+        return False
+    return isinstance(qty, int) and not isinstance(qty, bool) and qty >= 1
+
+
+def max_discount(discounts, cap):
+    """Sum stacked discounts, capped at `cap`."""
+    total = sum(discounts)
+    return min(total, cap)
+
+
+def round_money(amount):
+    """Round to 2 decimal places, half-up, in exactly one place."""
+    cents = Decimal(str(amount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    return float(cents)
+
+
+def recompute_total(items, price_table, tax=0, shipping=0, currency=BASE_CURRENCY):
+    """Recompute the order total server-side.
+
+    Prices come from `price_table`; client-supplied prices are ignored.
+    Shipping and tax are applied server-side. Rounding happens once, at
+    the order level. Returns None for unsupported currencies.
+    """
+    if currency != BASE_CURRENCY:
+        return None
+
+    subtotal = 0.0
+    for item in items:
+        price = server_price(item.get('sku'), price_table)
+        qty = item.get('qty')
+        if price is None or not validate_quantity(qty):
+            continue
+        subtotal += price * qty
+
+    total = subtotal * (1 + tax) + shipping
+    return round_money(total)
+
+
+def refund_amount(paid, already_refunded=0):
+    """Refundable balance based on the amount actually paid, never negative."""
+    return max(round_money(paid - already_refunded), 0)
